@@ -96,9 +96,9 @@ if not st.session_state.logged_in:
     with col_login:
         st.markdown("<br>", unsafe_allow_html=True) # Espaçamento superior
         st.subheader("🔐 Acesso Restrito")
-        perfil = st.radio("Selecione o seu perfil:", ["Secretaria", "Dr.", "Aluno"])
+        perfil = st.radio("Selecione o seu perfil:", ["Secretaria", "Dr.", "Público"])
         
-        if perfil != "Aluno":
+        if perfil != "Público":
             pwd = st.text_input("Senha", type="password")
             if st.button("Entrar", use_container_width=True):
                 if (perfil == "Secretaria" and pwd == "secretaria123") or (perfil == "Dr." and pwd == "doutor123"):
@@ -170,7 +170,13 @@ else:
             
             with col1:
                 nome = st.text_input("👤 Nome Completo", placeholder="Ex: João da Silva")
-                data = st.date_input("📅 Data de Nascimento", max_value=date.today())
+                
+                # Campos repartidos: Data e BI na mesma linha
+                col_d, col_bi = st.columns(2)
+                with col_d:
+                    data = st.date_input("📅 Data de Nascimento", max_value=date.today())
+                with col_bi:
+                    bi = st.text_input("🆔 Nº do BI", placeholder="Ex: 000000000LA000")
                 
                 col_a, col_b = st.columns(2)
                 with col_a:
@@ -182,7 +188,7 @@ else:
                 valor = st.number_input("💰 Valor da Matrícula (Kz)", min_value=0.0, format="%.2f")
                 comp = st.text_input("🧾 Código do Comprovativo", placeholder="Ex: REF123456789")
                 
-                # O botão deve ser um form_submit_button para limpar o formulário
+                # Botão de submissão
                 btn_confirmar = st.form_submit_button("✅ Confirmar Matrícula", use_container_width=True)
             
             with col2:
@@ -201,6 +207,8 @@ else:
             if btn_confirmar:
                 if len(nome.split()) < 2:
                     st.error("Erro: Insira o nome completo.")
+                elif not bi:
+                    st.error("Erro: O número do BI é obrigatório.")
                 elif not re.match(r"^[0-9]{0,2}[A-Za-z]$", turma.strip()):
                     st.error("Erro: Turma inválida (Ex: A ou 10A).")
                 elif not re.match(r"^[A-Za-z\s]+$", curso.strip()):
@@ -208,9 +216,9 @@ else:
                 elif valor < 1000:
                     st.error("Erro: Valor da matrícula insuficiente.")
                 else:
-                    # Chame a sua função original
-                    st.session_state.sistema.matricular(st.session_state.user_role, nome, data, turma, classe, curso, valor, comp)
-                    st.success("Matrícula processada com sucesso! Campos limpos.")
+                    # Chame a sua função original (incluindo o novo campo 'bi')
+                    st.session_state.sistema.matricular(st.session_state.user_role, nome, data, bi, turma, classe, curso, valor, comp)
+                    st.success("Matrícula processada com sucesso!")
                     st.balloons()
     elif menu == "Consultar":
         st.subheader("🔍 Consultar")
@@ -263,25 +271,37 @@ else:
             df = st.session_state.sistema.listar_tudo()
             
             if not df.empty:
-                # 2. Seleção e Edição
+                # 2. Seleção
                 id_sel = st.selectbox("Selecione o ID da Matrícula para Editar:", df['Matrícula'].tolist())
                 aluno_dados = df[df['Matrícula'] == id_sel].iloc[0]
                 
                 st.write("---")
                 st.write(f"Editando registro: **{aluno_dados['Aluno']}**")
                 
+                # 3. Campos de Edição Atualizados
                 col1, col2 = st.columns(2)
                 with col1:
                     novo_nome = st.text_input("Nome do Aluno", value=aluno_dados['Aluno'])
-                    nova_turma = st.text_input("Turma", value=aluno_dados['Turma'])
+                    novo_bi = st.text_input("Nº do BI", value=aluno_dados.get('BI', ''))
+                    # Data de Nascimento onde antes estava a Turma
+                    nova_data = st.date_input("Data de Nascimento", value=pd.to_datetime(aluno_dados.get('Data', '1990-01-01')))
+                
                 with col2:
-                    nova_classe = st.selectbox("Classe", [f"{i}ª Classe" for i in range(1, 13)], index=int(aluno_dados['Classe'].split('ª')[0])-1)
+                    # Classe e Turma divididas na mesma linha
+                    col_sub1, col_sub2 = st.columns(2)
+                    with col_sub1:
+                        nova_classe = st.selectbox("Classe", [f"{i}ª Classe" for i in range(1, 13)], index=int(aluno_dados['Classe'].split('ª')[0])-1)
+                    with col_sub2:
+                        nova_turma = st.text_input("Turma", value=aluno_dados['Turma'])
+                    
+                    novo_curso = st.text_input("Curso", value=aluno_dados.get('Curso', ''))
                     novo_valor = st.number_input("Valor da Matrícula", value=float(aluno_dados['Valor']))
                 
-                # 3. Ações
+                # 4. Ações
                 col_a, col_b = st.columns(2)
                 if col_a.button("💾 Salvar Alterações"):
-                    st.session_state.sistema.editar_matricula(st.session_state.user_role, id_sel, novo_nome, nova_turma, nova_classe, novo_valor)
+                    # Passando os parâmetros atualizados
+                    st.session_state.sistema.editar_matricula(st.session_state.user_role, id_sel, novo_nome, nova_turma, nova_classe, novo_valor, novo_bi, novo_curso, str(nova_data))
                     st.success("Dados atualizados com sucesso!")
                     st.rerun()
                 
@@ -292,7 +312,7 @@ else:
             else:
                 st.info("Nenhum registro encontrado para gerenciar.")
 
-            # 4. Rodapé Visual (Imagem de Gerenciamento)
+            # 5. Rodapé Visual
             st.write("<br>", unsafe_allow_html=True)
             st.image(
                 "https://images.unsplash.com/photo-1552664730-d307ca884978?q=80&w=1600", 
