@@ -3,11 +3,92 @@ import sqlite3
 import pandas as pd
 import os
 import re
-from datetime import date 
+from datetime import date, datetime, timedelta
 import shutil
-from datetime import datetime, timedelta
+
+# 1. DEFINIÇÃO DA CLASSE (Única e completa)
+class SistemaEscolar:
+    def __init__(self, db_name="escola.db"):
+        self.conn = sqlite3.connect(db_name, check_same_thread=False)
+        self.criar_tabelas()
+
+    def criar_tabelas(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS alunos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, data_nascimento TEXT, bi TEXT, turma TEXT, classe TEXT, comprovativo TEXT)''')
+        cursor.execute('CREATE TABLE IF NOT EXISTS cursos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome_curso TEXT)')
+        # Adicionado DEFAULT 'Pendente' no status
+        cursor.execute('''CREATE TABLE IF NOT EXISTS matriculas (id INTEGER PRIMARY KEY AUTOINCREMENT, aluno_id INTEGER, curso_id INTEGER, status TEXT DEFAULT 'Pendente', valor REAL, data_reg TEXT,
+                          FOREIGN KEY(aluno_id) REFERENCES alunos(id), FOREIGN KEY(curso_id) REFERENCES cursos(id))''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, usuario TEXT, acao TEXT)''')
+        self.conn.commit()
+
+    def aprovar_matricula(self, usuario, mat_id):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE matriculas SET status = 'Aprovado' WHERE id = ?", (mat_id,))
+        cursor.execute("INSERT INTO logs (data, usuario, acao) VALUES (?, ?, ?)", 
+                       (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), usuario, f"Aprovou matrícula ID: {mat_id}"))
+        self.conn.commit()
+
+    def matricular(self, usuario, nome, data_nasc, bi, turma, classe, nome_curso, valor, comprovativo):
+        cursor = self.conn.cursor()
+        
+        # 1. Inserir aluno
+        cursor.execute("INSERT INTO alunos (nome, data_nascimento, bi, turma, classe, comprovativo) VALUES (?, ?, ?, ?, ?, ?)", 
+                       (nome, str(data_nasc), bi, turma, classe, comprovativo))
+        aluno_id = cursor.lastrowid
+        
+        # 2. Inserir curso (se não existir) e buscar o ID
+        cursor.execute("INSERT OR IGNORE INTO cursos (nome_curso) VALUES (?)", (nome_curso,))
+        cursor.execute("SELECT id FROM cursos WHERE nome_curso = ?", (nome_curso,))
+        resultado = cursor.fetchone()
+        curso_id = resultado[0] if resultado else 1 
+        
+        # 3. Inserir matrícula (Apenas uma vez!)
+        # O status será automaticamente 'Pendente' pelo DEFAULT na criação da tabela
+        cursor.execute("INSERT INTO matriculas (aluno_id, curso_id, valor, data_reg) VALUES (?, ?, ?, ?)", 
+                       (aluno_id, curso_id, valor, datetime.now().strftime("%Y-%m-%d")))
+        
+        # 4. Log (Apenas uma vez!)
+        cursor.execute("INSERT INTO logs (data, usuario, acao) VALUES (?, ?, ?)", 
+                       (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), usuario, f"Matriculou: {nome} (Status: Pendente)"))
+        st.session_state.ultima_matricula = {
+            'Aluno': nome,
+            'Classe': classe,
+            'Curso': nome_curso,
+            'Data': str(data_nasc),
+            'Valor': valor
+        }
+        # Commita tudo de uma vez no final para garantir integridade
+        self.conn.commit()
+
+    def listar_tudo(self):
+        # Usamos o 'AS' para que as colunas tenham os nomes exatos que o seu código original espera
+        # Adicionei 'a.comprovativo AS Comprovativo' para permitir o download dos ficheiros
+        query = '''
+            SELECT a.nome AS Aluno, 
+                   a.classe AS Classe, 
+                   c.nome_curso AS Curso,
+                   a.data_nascimento AS Data,
+                   m.valor AS Valor,
+                   a.comprovativo AS Comprovativo
+            FROM alunos a
+            JOIN matriculas m ON a.id = m.aluno_id
+            JOIN cursos c ON m.curso_id = c.id
+        '''
+        return pd.read_sql_query(query, self.conn)
+
+# 2. CONFIGURAÇÃO DA PÁGINA
+st.set_page_config(page_title="Sistema Escolar Pro", layout="wide", page_icon="🎓")
+
+# 3. INICIALIZAÇÃO SEGURA
+if "sistema" in st.session_state:
+    del st.session_state.sistema
+
+if "sistema" not in st.session_state:
+    st.session_state.sistema = SistemaEscolar()
+
+# 4. FUNÇÕES AUXILIARES
 def formatar_tabela(df):
-    # Aplica formatação: cores alternadas, realce no cabeçalho e alinhamento
     return df.style.set_properties(**{
         'text-align': 'left',
         'border-color': '#d1d1d1',
@@ -19,69 +100,42 @@ def formatar_tabela(df):
         'selector': 'tr:nth-of-type(even)',
         'props': [('background-color', '#f2f2f2')]
     }])
-# Configuração da página
-st.set_page_config(page_title="Sistema Escolar Pro", layout="wide", page_icon="🎓")
 
-# --- CSS PARA ESTILO ---
-st.markdown("""
-    <style>
-    .main { background-color: #f8f9fa; }
-    .stButton>button { width: 100%; border-radius: 8px; background-color: #2c3e50; color: white; }
-    .titulo-principal { font-size: 2.5em; color: #2c3e50; font-weight: bold; text-align: center; margin-bottom: 20px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- CLASSE DO SISTEMA ---
-class SistemaEscolar:
-    def __init__(self, db_name="escola.db"):
-        self.conn = sqlite3.connect(db_name, check_same_thread=False)
-        self.criar_tabelas()
-
-    def criar_tabelas(self):
-        cursor = self.conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS alunos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, data_nascimento TEXT, turma TEXT, classe TEXT, comprovativo TEXT)''')
-        cursor.execute('CREATE TABLE IF NOT EXISTS cursos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome_curso TEXT)')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS matriculas (id INTEGER PRIMARY KEY AUTOINCREMENT, aluno_id INTEGER, curso_id INTEGER, status TEXT, valor REAL, data_reg TEXT,
-                          FOREIGN KEY(aluno_id) REFERENCES alunos(id), FOREIGN KEY(curso_id) REFERENCES cursos(id))''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, usuario TEXT, acao TEXT)''')
-        self.conn.commit()
-
-    def matricular(self, usuario, nome, data_nasc, turma, classe, nome_curso, valor, comprovativo):
-        cursor = self.conn.cursor()
-        cursor.execute("INSERT INTO alunos (nome, data_nascimento, turma, classe, comprovativo) VALUES (?, ?, ?, ?, ?)", (nome, str(data_nasc), turma, classe, comprovativo))
-        aluno_id = cursor.lastrowid
-        cursor.execute("INSERT OR IGNORE INTO cursos (nome_curso) VALUES (?)", (nome_curso,))
-        cursor.execute("SELECT id FROM cursos WHERE nome_curso = ?", (nome_curso,))
-        curso_id = cursor.fetchone()[0]
-        cursor.execute("INSERT INTO matriculas (aluno_id, curso_id, status, valor, data_reg) VALUES (?, ?, ?, ?, ?)", (aluno_id, curso_id, "Ativo", valor, datetime.now().strftime("%Y-%m-%d")))
-        self.conn.commit()
-        cursor.execute("INSERT INTO logs (data, usuario, acao) VALUES (?, ?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), usuario, f"Matriculou: {nome} | Comp: {comprovativo}"))
-        self.conn.commit()
-
-    def listar_tudo(self):
-        query = 'SELECT m.id AS Matrícula, a.nome AS Aluno, a.classe AS Classe, a.turma AS Turma, c.nome_curso AS Curso, m.valor AS Valor, m.data_reg AS Data, a.comprovativo AS Comprovativo FROM matriculas m JOIN alunos a ON m.aluno_id = a.id JOIN cursos c ON m.curso_id = c.id'
-        try: return pd.read_sql_query(query, self.conn)
-        except: return pd.DataFrame()
-
-    def editar_matricula(self, usuario, mat_id, nome, turma, classe, valor):
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT aluno_id FROM matriculas WHERE id = ?", (mat_id,))
-        aluno_id = cursor.fetchone()[0]
-        cursor.execute("UPDATE alunos SET nome = ?, turma = ?, classe = ? WHERE id = ?", (nome, turma, classe, aluno_id))
-        cursor.execute("UPDATE matriculas SET valor = ? WHERE id = ?", (valor, mat_id))
-        self.conn.commit()
-        self.conn.execute("INSERT INTO logs (data, usuario, acao) VALUES (?, ?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), usuario, f"Editou ID: {mat_id}"))
-        self.conn.commit()
-
-    def deletar_matricula(self, usuario, mat_id):
-        self.conn.execute("DELETE FROM matriculas WHERE id = ?", (mat_id,))
-        self.conn.execute("INSERT INTO logs (data, usuario, acao) VALUES (?, ?, ?)", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), usuario, f"Deletou ID: {mat_id}"))
-        self.conn.commit()
+# Estas funções devem estar fora de formatar_tabela e fazem parte da classe SistemaEscolar
+# (Certifique-se de que estão dentro da classe no seu código original)
 
 def realizar_backup():
     if not os.path.exists("backups"): os.makedirs("backups")
     shutil.copy("escola.db", f"backups/escola_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db")
 
+from fpdf import FPDF
+
+def gerar_ficha_matricula(dados):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    
+    # Cabeçalho
+    pdf.cell(200, 10, txt="Complexo Escolar Privado DF", ln=True, align='C')
+    pdf.set_font("Arial", '', 12)
+    pdf.cell(200, 10, txt="Ficha de Comprovativo de Matrícula", ln=True, align='C')
+    pdf.ln(10)
+    
+    # Dados do Aluno
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 10, txt=f"Aluno: {dados['Aluno']}", ln=True)
+    pdf.set_font("Arial", '', 12)
+    pdf.cell(200, 10, txt=f"Classe: {dados['Classe']}", ln=True)
+    pdf.cell(200, 10, txt=f"Curso: {dados['Curso']}", ln=True)
+    pdf.cell(200, 10, txt=f"Data de Nascimento: {dados['Data']}", ln=True)
+    pdf.cell(200, 10, txt=f"Valor Pago: Kz {float(dados['Valor']):,.2f}", ln=True)
+    pdf.cell(200, 10, txt=f"Data da Matrícula: {datetime.now().strftime('%d/%m/%Y')}", ln=True)
+    
+    pdf.ln(20)
+    pdf.cell(200, 10, txt="__________________________", ln=True, align='C')
+    pdf.cell(200, 10, txt="Assinatura da Secretaria", ln=True, align='C')
+    
+    return pdf.output(dest='S').encode('latin-1')
 # --- INTERFACE ---
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 if 'sistema' not in st.session_state: st.session_state.sistema = SistemaEscolar()
@@ -107,11 +161,20 @@ if not st.session_state.logged_in:
                     st.rerun()
                 else: 
                     st.error("Senha incorreta!")
+                    
         else:
+            # Opção para o Aluno (Público)
+            st.info("Insira o seu BI para consultar o estado da matrícula.")
+            bi_consulta = st.text_input("Nº do BI:")
+            
             if st.button("Acessar Matrícula", use_container_width=True):
-                st.session_state.logged_in = True
-                st.session_state.user_role = "Aluno"
-                st.rerun()
+                if bi_consulta:
+                    st.session_state.logged_in = True
+                    st.session_state.user_role = "Aluno"
+                    st.session_state.bi_aluno = bi_consulta # Armazena o BI para futuras consultas
+                    st.rerun()
+                else:
+                    st.warning("Por favor, insira o seu BI.")
                 
     with col_img:
         # Definimos uma largura fixa proporcional para a imagem não ficar gigante
@@ -163,47 +226,69 @@ else:
     elif menu == "Matricular":
         st.markdown('<h1 class="titulo-principal">🎓 Matrícula de Aluno - Complexo Escolar DF</h1>', unsafe_allow_html=True)
         st.write("---")
-        
-        # Usamos st.form para agrupar e limpar campos automaticamente após o clique
-        with st.form("form_matricula", clear_on_submit=True):
-            col1, col2 = st.columns([1, 1])
-            
-            with col1:
-                nome = st.text_input("👤 Nome Completo", placeholder="Ex: João da Silva")
-                
-                # Campos repartidos: Data e BI na mesma linha
-                col_d, col_bi = st.columns(2)
-                with col_d:
-                    data = st.date_input("📅 Data de Nascimento", max_value=date.today())
-                with col_bi:
-                    bi = st.text_input("🆔 Nº do BI", placeholder="Ex: 000000000LA000")
-                
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    classe = st.selectbox("📚 Classe", [f"{i}ª Classe" for i in range(1, 13)])
-                with col_b:
-                    turma = st.text_input("🏫 Turma", placeholder="Ex: A")
-                
-                curso = st.text_input("🎓 Curso", placeholder="Ex: Ciências Físicas e Biológicas")
-                valor = st.number_input("💰 Valor da Matrícula (Kz)", min_value=0.0, format="%.2f")
-                comp = st.text_input("🧾 Código do Comprovativo", placeholder="Ex: REF123456789")
-                
-                # Botão de submissão
-                btn_confirmar = st.form_submit_button("✅ Confirmar Matrícula", use_container_width=True)
-            
-            with col2:
-                st.markdown(
-                    """
-                    <div style="width: 100%; min-height: 400px; background-color: #f0f2f6; border-radius: 10px; overflow: hidden;">
-                        <img src="https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?w=800" 
-                             style="width: 100%; height: 100%; object-fit: cover;">
-                    </div>
-                    """, 
-                    unsafe_allow_html=True
-                )
-                st.info("ℹ️ **Nota:** O sistema valida automaticamente o formato dos dados.")
 
-            # Lógica de validação pós-clique
+        # Define o papel do usuário
+        role = st.session_state.get("user_role")
+        exibir_formulario_matricula = True  # Por padrão, assume que deve exibir
+
+        # Lógica apenas se for Aluno
+        if role == "Aluno":
+            bi = st.session_state.get('bi_aluno')
+            cursor = st.session_state.sistema.conn.cursor()
+            query_status = """
+                SELECT m.status 
+                FROM matriculas m 
+                JOIN alunos a ON m.aluno_id = a.id 
+                WHERE a.bi = ? 
+                ORDER BY m.id DESC LIMIT 1
+            """
+            cursor.execute(query_status, (bi,))
+            resultado = cursor.fetchone()
+            
+            if resultado:
+                status = resultado[0]
+                if status == "Pendente":
+                    st.warning("⚠️ **Status da sua Matrícula:** Pendente. Aguarde a validação da secretaria.")
+                    exibir_formulario_matricula = False
+                else:
+                    st.success("✅ **Status da sua Matrícula:** Aprovado! Seja bem-vindo(a).")
+                    exibir_formulario_matricula = False
+            else:
+                st.info("Preencha o formulário abaixo para iniciar sua matrícula:")
+                exibir_formulario_matricula = True
+
+        # Exibe o formulário se a lógica acima permitir
+        if exibir_formulario_matricula:
+            with st.form("form_matricula", clear_on_submit=True):
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    nome = st.text_input("👤 Nome Completo", placeholder="Ex: João da Silva")
+                    col_d, col_bi = st.columns(2)
+                    with col_d:
+                        data = st.date_input("📅 Data de Nascimento", max_value=date.today())
+                    with col_bi:
+                        bi = st.text_input("🆔 Nº do BI", value=st.session_state.get('bi_aluno', ''), placeholder="Ex: 000000000LA000")
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        classe = st.selectbox("📚 Classe", [f"{i}ª Classe" for i in range(1, 13)])
+                    with col_b:
+                        turma = st.text_input("🏫 Turma", placeholder="Ex: A")
+                    
+                    curso = st.text_input("🎓 Curso", placeholder="Ex: Ciências Físicas e Biológicas")
+                    valor = st.number_input("💰 Valor da Matrícula (Kz)", min_value=0.0, format="%.2f")
+                    comp_file = st.file_uploader("🧾 Carregar Comprovativo", type=['png', 'jpg', 'jpeg', 'pdf'])
+                    
+                    btn_confirmar = st.form_submit_button("✅ Confirmar Matrícula", use_container_width=True)
+                
+                with col2:
+                    st.markdown("""<div style="width: 100%; min-height: 400px; background-color: #f0f2f6; border-radius: 10px; overflow: hidden;">
+                                    <img src="https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?w=800" style="width: 100%; height: 100%; object-fit: cover;">
+                                </div>""", unsafe_allow_html=True)
+                    st.info("ℹ️ **Nota:** O sistema valida automaticamente o formato dos dados.")
+
+            # --- A LÓGICA DE VALIDAÇÃO ESTÁ AQUI (FORA DO WITH ST.FORM) ---
             if btn_confirmar:
                 if len(nome.split()) < 2:
                     st.error("Erro: Insira o nome completo.")
@@ -215,11 +300,42 @@ else:
                     st.error("Erro: O curso deve conter apenas letras.")
                 elif valor < 1000:
                     st.error("Erro: Valor da matrícula insuficiente.")
+                elif comp_file is None:
+                    st.error("Erro: Por favor, carregue o comprovativo.")
                 else:
-                    # Chame a sua função original (incluindo o novo campo 'bi')
-                    st.session_state.sistema.matricular(st.session_state.user_role, nome, data, bi, turma, classe, curso, valor, comp)
+                    if not os.path.exists("uploads"):
+                        os.makedirs("uploads")
+                    
+                    caminho_ficheiro = f"uploads/{datetime.now().strftime('%Y%m%d%H%M%S')}_{comp_file.name}"
+                    with open(caminho_ficheiro, "wb") as f:
+                        f.write(comp_file.getbuffer())
+                    
+                    # Usa 'role' definido no início. Se for público, passamos "Visitante"
+                    user_type = role if role else "Visitante"
+                    st.session_state.sistema.matricular(user_type, nome, data, bi, turma, classe, curso, valor, caminho_ficheiro)
+                    
                     st.success("Matrícula processada com sucesso!")
                     st.balloons()
+                    st.rerun()
+
+            # AQUI ESTÁ A CORREÇÃO PARA O BOTÃO APARECER ---
+        if "ultima_matricula" in st.session_state:
+            dados = st.session_state.ultima_matricula
+            st.write("---")
+            st.info("Matrícula realizada! Você já pode baixar seu comprovativo abaixo.")
+            
+            pdf_bytes = gerar_ficha_matricula(dados)
+            st.download_button(
+                label="📥 Baixar Ficha de Matrícula",
+                data=pdf_bytes,
+                file_name=f"ficha_{dados['Aluno'].replace(' ', '_')}.pdf",
+                mime="application/pdf"
+            )
+            
+            # Opcional: botão para limpar e permitir nova matrícula
+            if st.button("Nova Matrícula"):
+                del st.session_state.ultima_matricula
+                st.rerun()
     elif menu == "Consultar":
         st.subheader("🔍 Consultar")
         
@@ -255,6 +371,25 @@ else:
             
             if not df_filtrado.empty:
                 st.write(formatar_tabela(df_filtrado).to_html(), unsafe_allow_html=True)
+                
+                # --- ATUALIZAÇÃO: Download do Comprovativo na Consulta ---
+                st.write("---")
+                st.write("### 📂 Baixar Comprovativo dos Resultados")
+                # Permite escolher apenas entre os alunos filtrados
+                aluno_escolhido = st.selectbox("Selecione um aluno da lista para baixar o comprovativo:", df_filtrado['Aluno'].unique())
+                
+                if aluno_escolhido:
+                    caminho = df_filtrado.loc[df_filtrado['Aluno'] == aluno_escolhido, 'Comprovativo'].values[0]
+                    if caminho and os.path.exists(caminho):
+                        with open(caminho, "rb") as file:
+                            st.download_button(
+                                label=f"📥 Baixar comprovativo: {aluno_escolhido}",
+                                data=file,
+                                file_name=os.path.basename(caminho),
+                                mime="application/octet-stream"
+                            )
+                    else:
+                        st.warning("Comprovativo não encontrado.")
             else:
                 st.warning(f"Nenhum resultado encontrado para: {termo_uso}")
         else:
@@ -264,30 +399,46 @@ else:
         st.write("---")
         st.image("https://images.unsplash.com/photo-1524995997946-a1c2e315a42f?w=1600", use_container_width=True)
     elif menu == "Gerenciar":
-        if st.session_state.user_role == "Dr.":
-            st.subheader("✏️ Gerenciar Matrículas")
+        st.subheader("📋 Gestão de Matrículas Pendentes")
+        
+        # 1. Área de Aprovação (Disponível para ambos: Dr. e Secretaria)
+        if st.session_state.get("user_role") in ["Dr.", "Secretaria"]:
+            pendentes = pd.read_sql("SELECT * FROM matriculas WHERE status = 'Pendente'", st.session_state.sistema.conn)
             
-            # 1. Carregar dados
+            if not pendentes.empty:
+                for index, row in pendentes.iterrows():
+                    st.write(f"---")
+                    st.write(f"**ID:** {row['id']} | **Aluno ID:** {row['aluno_id']} | **Valor:** {row['valor']} Kz")
+                    if st.button(f"✅ Ativar Matrícula {row['id']}", key=f"btn_{row['id']}"):
+                        st.session_state.sistema.aprovar_matricula(st.session_state.user_role, row['id'])
+                        st.success(f"Matrícula {row['id']} ativada!")
+                        st.rerun()
+            else:
+                st.info("Não existem matrículas pendentes de momento.")
+        
+        st.write("---")
+
+        # 2. Área de Edição e Exclusão (Restrita apenas ao Dr.)
+        if st.session_state.user_role == "Dr.":
+            st.subheader("✏️ Gerenciar Matrículas (Edição/Exclusão)")
+            
+            # Carregar dados
             df = st.session_state.sistema.listar_tudo()
             
             if not df.empty:
-                # 2. Seleção
+                # Seleção
                 id_sel = st.selectbox("Selecione o ID da Matrícula para Editar:", df['Matrícula'].tolist())
                 aluno_dados = df[df['Matrícula'] == id_sel].iloc[0]
                 
-                st.write("---")
                 st.write(f"Editando registro: **{aluno_dados['Aluno']}**")
                 
-                # 3. Campos de Edição Atualizados
                 col1, col2 = st.columns(2)
                 with col1:
                     novo_nome = st.text_input("Nome do Aluno", value=aluno_dados['Aluno'])
                     novo_bi = st.text_input("Nº do BI", value=aluno_dados.get('BI', ''))
-                    # Data de Nascimento onde antes estava a Turma
                     nova_data = st.date_input("Data de Nascimento", value=pd.to_datetime(aluno_dados.get('Data', '1990-01-01')))
                 
                 with col2:
-                    # Classe e Turma divididas na mesma linha
                     col_sub1, col_sub2 = st.columns(2)
                     with col_sub1:
                         nova_classe = st.selectbox("Classe", [f"{i}ª Classe" for i in range(1, 13)], index=int(aluno_dados['Classe'].split('ª')[0])-1)
@@ -297,10 +448,9 @@ else:
                     novo_curso = st.text_input("Curso", value=aluno_dados.get('Curso', ''))
                     novo_valor = st.number_input("Valor da Matrícula", value=float(aluno_dados['Valor']))
                 
-                # 4. Ações
+                # Ações
                 col_a, col_b = st.columns(2)
                 if col_a.button("💾 Salvar Alterações"):
-                    # Passando os parâmetros atualizados
                     st.session_state.sistema.editar_matricula(st.session_state.user_role, id_sel, novo_nome, nova_turma, nova_classe, novo_valor, novo_bi, novo_curso, str(nova_data))
                     st.success("Dados atualizados com sucesso!")
                     st.rerun()
@@ -312,7 +462,7 @@ else:
             else:
                 st.info("Nenhum registro encontrado para gerenciar.")
 
-            # 5. Rodapé Visual
+            # Rodapé Visual
             st.write("<br>", unsafe_allow_html=True)
             st.image(
                 "https://images.unsplash.com/photo-1552664730-d307ca884978?q=80&w=1600", 
@@ -320,7 +470,7 @@ else:
                 caption="Gerenciamento de Matrículas - Sistema Escolar"
             )
         else:
-            st.warning("Acesso restrito apenas ao perfil Dr.")
+            st.info("Apenas o Dr. tem acesso às funções de Edição e Exclusão.")
     elif menu == "Relatórios":
         from io import BytesIO
         st.subheader("📊 Relatórios")
@@ -337,11 +487,12 @@ else:
             st.session_state.relatorio_ativo = False
             st.rerun()
 
-        # 3. Lógica de exibição condicional (apenas a tabela e métricas aqui)
+        # 3. Lógica de exibição condicional
         if st.session_state.relatorio_ativo:
             df_original = st.session_state.sistema.listar_tudo()
             
             if not df_original.empty:
+                # Conversão segura de datas
                 df_original['Data'] = pd.to_datetime(df_original['Data'])
                 filtro = st.selectbox("Período", ["Geral", "Diário", "Semanal", "Mensal", "Trimestral", "Semestral", "Anual"])
                 
@@ -355,11 +506,30 @@ else:
                 elif filtro == "Semestral": df = df[df['Data'] >= (hoje - timedelta(days=180))]
                 elif filtro == "Anual": df = df[df['Data'].dt.year == hoje.year]
                 
-                # Exibição
+                # Exibição da tabela
                 st.write(formatar_tabela(df).to_html(), unsafe_allow_html=True)
                 st.metric(f"Total {filtro}", f"Kz {df['Valor'].sum():,.2f}")
                 
-                # Download
+                # --- NOVA ATUALIZAÇÃO: Visualizar Comprovativo ---
+                st.write("---")
+                st.write("### 📂 Visualizar Comprovativos")
+                nome_selecionado = st.selectbox("Selecione o aluno para baixar o comprovativo:", df['Aluno'].unique())
+                
+                if nome_selecionado:
+                    caminho = df.loc[df['Aluno'] == nome_selecionado, 'Comprovativo'].values[0]
+                    if caminho and os.path.exists(caminho):
+                        with open(caminho, "rb") as file:
+                            st.download_button(
+                                label=f"📥 Baixar comprovativo de {nome_selecionado}",
+                                data=file,
+                                file_name=os.path.basename(caminho),
+                                mime="application/octet-stream"
+                            )
+                    else:
+                        st.warning("Comprovativo não encontrado.")
+                
+                # Download de Relatórios
+                st.write("---")
                 st.write("### 📥 Opções de Download")
                 col_d1, col_d2 = st.columns(2)
                 csv = df.to_csv(index=False).encode('utf-8')
@@ -378,7 +548,7 @@ else:
         else:
             st.info("Clique em 'Gerar Relatório' para visualizar os dados financeiros.")
         
-        # 4. A IMAGEM FICA AQUI FORA (sempre visível no rodapé)
+        # 4. A IMAGEM
         st.write("---")
         st.image("https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1600", use_container_width=True)
     if st.sidebar.button("Sair"):
